@@ -1,135 +1,74 @@
-using System.Runtime.CompilerServices;
-using System.Text.RegularExpressions;
+using MainCore.Common.Models;
+using Microsoft.Playwright;
 
-namespace MainCore.Services;
-
-public class ChromeSetting
+namespace MainCore.Services
 {
-    public required string ProfilePath { get; set; }
-    public required string UserAgent { get; set; }
-    public string? ProxyHost { get; set; }
-    public int ProxyPort { get; set; }
-    public string? ProxyUsername { get; set; }
-    public string? ProxyPassword { get; set; }
-    public bool IsHeadless { get; set; }
-}
-
-public sealed class ChromeBrowser(IDbContextFactory<AppDbContext> contextFactory) : IChromeBrowser
-{
-    private IPlaywright? _playwright;
-    private IBrowserContext? _browser;
-    private IPage? _mainPage;
-    private IReadOnlyDictionary<string, int> _buildingNames = new Dictionary<string, int>();
-
-    public IPage CurrentPage => _mainPage ?? throw new InvalidOperationException("Main page is not initialized.");
-
-    public IReadOnlyDictionary<string, int> BuildingNames => _buildingNames;
-
-    public string CurrentUrl => _mainPage?.Url ?? "";
-
-    public ILogger Logger { get; set; } = null!;
-
-    public bool IsInitialized => _playwright is not null && _browser is not null && _mainPage is not null;
-    public bool IsHeadless { get; private set; }
-
-    public AccountId AccountId { get; private set; }
-
-    public void SetAccountId(AccountId accountId)
+    public class ChromeBrowser : IChromeBrowser
     {
-        AccountId = accountId;
-    }
+        private IPlaywright _playwright;
+        private IBrowserContext _context;
+        private IPage _page;
 
-    public async Task DelayClick()
-    {
-        using var context = contextFactory.CreateDbContext();
-        var delay = context.ByName(AccountId, AccountSettingEnums.ClickDelayMin, AccountSettingEnums.ClickDelayMax);
-        await Task.Delay(delay);
-    }
+        private readonly string[] _extensionsPath;
 
-    public async Task Setup(ChromeSetting setting)
-    {
-        _playwright = await Playwright.CreateAsync();
-        _browser = await _playwright.Chromium.LaunchPersistentContextAsync(GetPathUserData(setting), new()
+        public ChromeBrowser(string[] extensionsPath)
         {
-            Channel = "chrome",
-            Headless = setting.IsHeadless,
-            Proxy = string.IsNullOrEmpty(setting.ProxyHost) ? null : new()
+            _extensionsPath = extensionsPath;
+        }
+
+        public async Task Setup(ChromeSetting setting)
+        {
+            _playwright = await Playwright.CreateAsync();
+
+            var args = new List<string>
             {
-                Server = $"{setting.ProxyHost}:{setting.ProxyPort}",
-                Username = setting.ProxyUsername,
-                Password = setting.ProxyPassword
-            },
-            ViewportSize = ViewportSize.NoViewport,
-            UserAgent = string.IsNullOrEmpty(setting.UserAgent) ? null : setting.UserAgent,
-            Args =
-            [
-                "--ignore-certificate-errors",
-                "--no-default-browser-check",
-                "--no-first-run",
-                "--ash-no-nudges",
-                "--mute-audio",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--disable-search-engine-choice-screen",
-                "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-                "--force-webrtc-ip-handling-policy",
-            ],
-        });
-        _browser.Response += OnBrowserResponse;
-        IsHeadless = setting.IsHeadless;
-        _mainPage = await _browser.NewPageAsync();
+                "--start-maximized",
+                "--disable-extensions-except=C:\\travian\\tampermonkey_ext",
+                "--load-extension=C:\\travian\\tampermonkey_ext"
+            };
 
-        var firstPage = _browser.Pages.Count > 1 ? _browser.Pages[0] : null;
-        if (firstPage != null && firstPage.Url == "about:blank")
-        {
-            await firstPage.CloseAsync();
-        }
-    }
-
-    private async void OnBrowserResponse(object? sender, IResponse response)
-    {
-        // 304 (revalidated cache hit) is not Ok in Playwright, so only skip error statuses
-        if (response.Status >= 400 || !response.Url.Contains("/allgemein.json", StringComparison.OrdinalIgnoreCase)) return;
-
-        try
-        {
-            var raw = await response.JsonAsync<Dictionary<string, string>>();
-            if (raw is null) return;
-
-            var names = new Dictionary<string, int>();
-            foreach (var (key, value) in raw)
+            if (_extensionsPath is not null && _extensionsPath.Length > 0)
             {
-                if (key.StartsWith("gid", StringComparison.Ordinal) && int.TryParse(key.AsSpan(3), out var gid) && !string.IsNullOrWhiteSpace(value))
-                    names[value.Trim()] = gid;
+                var extPaths = string.Join(",", _extensionsPath);
+                args.Add($"--disable-extensions-except={extPaths}");
+                args.Add($"--load-extension={extPaths}");
             }
-            _buildingNames = names;
-        }
-        catch (Exception ex)
-        {
-            Logger?.Warning(ex, "Reading building names from [{Url}] failed.", response.Url);
-        }
-    }
 
-    private static string GetPathUserData(ChromeSetting setting)
-    {
-        var pathUserData = Path.Combine(AppContext.BaseDirectory, "Data", "Cache", setting.ProfilePath);
-        if (!Directory.Exists(pathUserData)) Directory.CreateDirectory(pathUserData);
-        pathUserData = Path.Combine(pathUserData, string.IsNullOrEmpty(setting.ProxyHost) ? "default" : setting.ProxyHost);
-        return pathUserData;
-    }
-
-    public async Task Shutdown()
-    {
-        try
-        {
-            if (_mainPage is not null)
+            var options = new BrowserTypeLaunchPersistentContextOptions
             {
-                await _mainPage.CloseAsync();
-                _mainPage = null;
+                ExecutablePath = setting.ChromePath,
+                Headless = false, // Luôn mở giao diện trình duyệt để nạp Extension và tránh lỗi Timeout nút bấm
+                Args = args,
+                ViewportSize = ViewportSize.NoViewport, // Giữ nguyên kích thước toàn màn hình
+                IgnoreDefaultArgs = new[] { "--disable-extensions", "--enable-automation" }
+            };
+
+            if (!string.IsNullOrEmpty(setting.ProxyHost))
+            {
+                options.Proxy = new Proxy
+                {
+                    Server = $"{setting.ProxyHost}:{setting.ProxyPort}",
+                    Username = setting.ProxyUsername,
+                    Password = setting.ProxyPassword
+                };
             }
-            if (_browser is not null)
+
+            _context = await _playwright.Chromium.LaunchPersistentContextAsync(setting.UserDataDir, options);
+            _page = _context.Pages.FirstOrDefault() ?? await _context.NewPageAsync();
+            _page.SetDefaultTimeout(30000);
+        }
+
+        public IPage Page => _page;
+
+        public async Task Shutdown()
+        {
+            if (_context is not null)
             {
-                await _browser.CloseAsync();
-                _browser = null;
+                await _context.CloseAsync();
+                _context = null;
             }
             if (_playwright is not null)
             {
@@ -137,176 +76,25 @@ public sealed class ChromeBrowser(IDbContextFactory<AppDbContext> contextFactory
                 _playwright = null;
             }
         }
-        catch (Exception ex)
-        {
-            Logger.Error(ex, "Error during shutdown: {Message}", ex.Message);
-        }
-    }
 
-    public async Task<string> Screenshot()
-    {
-        if (_mainPage is null)
+        public async Task Navigate(string url)
         {
-            Logger.Error("Screenshot failed: main page is null");
-            return "";
+            if (string.IsNullOrEmpty(url)) return;
+            await _page.GotoAsync(url, new PageGotoOptions
+            {
+                WaitUntil = WaitUntilState.DOMContentLoaded
+            });
         }
 
-        var screenshot = await _mainPage.ScreenshotAsync();
-        if (screenshot is null)
+        public async Task Click(ILocator locator, string expression = "")
         {
-            Logger.Error("Screenshot failed: screenshot is null");
-            return "";
-        }
-
-        var fileName = Path.Combine(AppContext.BaseDirectory, "Screenshots", $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.png");
-        Directory.CreateDirectory(Path.GetDirectoryName(fileName)!);
-        await File.WriteAllBytesAsync(fileName, screenshot ?? [], CancellationToken.None);
-        return fileName;
-    }
-
-    public async Task<Result> Refresh()
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("Refresh failed: main page is null");
-            return Stop.Error;
-        }
-        await _mainPage.ReloadAsync();
-        return Result.Ok();
-    }
-
-    public async Task<Result> Navigate(string url)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("Navigate failed: main page is null");
-            return Stop.Error;
-        }
-
-        try
-        {
-            await _mainPage.GotoAsync(url);
-            return Result.Ok();
-        }
-        catch (TimeoutException ex)
-        {
-            Logger.Error(ex, "Navigating to URL [{Url}] timed out.", url);
-            return Retry.Error;
-        }
-    }
-
-    public async Task<Result> Click(ILocator locator, [CallerArgumentExpression(nameof(locator))] string? expression = null)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("Click failed: main page is null");
-            return Stop.Error;
-        }
-        try
-        {
+            await locator.ScrollIntoViewIfNeededAsync();
             await locator.ClickAsync();
-            await DelayClick();
-            return Result.Ok();
         }
-        catch (TimeoutException ex)
-        {
-            Logger.Error(ex, "Clicking locator [{Expression}] timed out.", expression);
-            return Retry.Error;
-        }
-    }
 
-    public async Task<Result> Input(ILocator locator, string content, [CallerArgumentExpression(nameof(locator))] string? expression = null)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("Input failed: main page is null");
-            return Stop.Error;
-        }
-        try
+        public async Task Input(ILocator locator, string content)
         {
             await locator.FillAsync(content);
-            await DelayClick();
-            return Result.Ok();
-        }
-        catch (TimeoutException ex)
-        {
-            Logger.Error(ex, "Inputting into locator [{Expression}] timed out.", expression);
-            return Retry.Error;
-        }
-    }
-
-    public async Task<Result> ExecuteJsScript(string javascript)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("ExecuteJsScript failed: main page is null");
-            return Stop.Error;
-        }
-        await _mainPage.EvaluateAsync(javascript);
-        await DelayClick();
-        return Result.Ok();
-    }
-
-    public async Task<Result> Wait(ILocator locator, [CallerArgumentExpression(nameof(locator))] string? expression = null)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("Wait failed: main page is null");
-            return Stop.Error;
-        }
-        try
-        {
-            const int timeout = 10_000; // 10 seconds in milliseconds
-            await locator.WaitForAsync(new() { Timeout = timeout });
-            return Result.Ok();
-        }
-        catch (TimeoutException ex)
-        {
-            Logger.Error(ex, "Waiting for locator [{Expression}] timed out.", expression);
-            return Retry.Error;
-        }
-    }
-
-    public async Task<Result> Wait(ILocator locator, string condition, [CallerArgumentExpression(nameof(locator))] string? expression = null)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("Wait failed: main page is null");
-            return Stop.Error;
-        }
-        try
-        {
-            await locator.WaitForFunctionAsync(condition);
-            return Result.Ok();
-        }
-        catch (TimeoutException ex)
-        {
-            Logger.Error(ex, "Waiting for locator [{Expression}] timed out.", expression);
-            return Retry.Error;
-        }
-    }
-
-    public async Task<Result> WaitPageChanged(string url)
-    {
-        if (_mainPage is null)
-        {
-            Logger.Error("WaitPageChanged failed: main page is null");
-            return Stop.Error;
-        }
-
-        try
-        {
-            const int timeout = 180_000; // 3 minutes in milliseconds
-            await _mainPage.WaitForURLAsync(new Regex(url, RegexOptions.IgnoreCase, TimeSpan.FromSeconds(1)), new() { Timeout = timeout });
-            await _mainPage.WaitForLoadStateAsync();
-            await _mainPage.GetServerTime().WaitForAsync(new() { Timeout = timeout });
-            return Result.Ok();
-        }
-        catch (TimeoutException ex)
-        {
-            string actualUrl = _mainPage.Url;
-            Logger.Error(ex, "Navigation or page load failed. Expected URL: [{Url}]. Current URL: [{ActualUrl}]", url, actualUrl);
-            return Retry.Error;
         }
     }
 }
