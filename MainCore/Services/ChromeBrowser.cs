@@ -52,7 +52,8 @@ public sealed class ChromeBrowser(IDbContextFactory<AppDbContext> contextFactory
         _browser = await _playwright.Chromium.LaunchPersistentContextAsync(GetPathUserData(setting), new()
         {
             Channel = "chrome",
-            Headless = setting.IsHeadless,
+            Headless = false,
+            IgnoreDefaultArgs = ["--disable-extensions"],
             Proxy = string.IsNullOrEmpty(setting.ProxyHost) ? null : new()
             {
                 Server = $"{setting.ProxyHost}:{setting.ProxyPort}",
@@ -72,10 +73,13 @@ public sealed class ChromeBrowser(IDbContextFactory<AppDbContext> contextFactory
                 "--disable-search-engine-choice-screen",
                 "--webrtc-ip-handling-policy=disable_non_proxied_udp",
                 "--force-webrtc-ip-handling-policy",
+                "--start-maximized",
+                "--disable-extensions-except=C:\\travian\\tampermonkey_ext",
+                "--load-extension=C:\\travian\\tampermonkey_ext",
             ],
         });
         _browser.Response += OnBrowserResponse;
-        IsHeadless = setting.IsHeadless;
+        IsHeadless = false;
         _mainPage = await _browser.NewPageAsync();
 
         var firstPage = _browser.Pages.Count > 1 ? _browser.Pages[0] : null;
