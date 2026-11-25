@@ -51,7 +51,6 @@ public sealed class ChromeBrowser(IDbContextFactory<AppDbContext> contextFactory
         _playwright = await Playwright.CreateAsync();
         _browser = await _playwright.Chromium.LaunchPersistentContextAsync(GetPathUserData(setting), new()
         {
-            Channel = "chrome",
             Headless = false,
             IgnoreDefaultArgs = ["--disable-extensions"],
             Proxy = string.IsNullOrEmpty(setting.ProxyHost) ? null : new()
@@ -74,8 +73,8 @@ public sealed class ChromeBrowser(IDbContextFactory<AppDbContext> contextFactory
                 "--webrtc-ip-handling-policy=disable_non_proxied_udp",
                 "--force-webrtc-ip-handling-policy",
                 "--start-maximized",
-                "--disable-extensions-except=C:\\travian\\tampermonkey_ext",
-                "--load-extension=C:\\travian\\tampermonkey_ext",
+                "--disable-extensions-except=C:\\Users\\HLC\\Downloads\\travian\\tampermonkey-stable",
+                "--load-extension=C:\\Users\\HLC\\Downloads\\travian\\tampermonkey-stable",
             ],
         });
         _browser.Response += OnBrowserResponse;
